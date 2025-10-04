@@ -79,7 +79,7 @@ def monitor_sec_filings():
     feed = feedparser.parse(url)
     new_filings = []
     eastern = pytz.timezone('US/Eastern')
-    cutoff = datetime.now(eastern) - timedelta(minutes=60)
+    cutoff = datetime.now(eastern) - timedelta(minutes=120)
 
     for entry in feed.entries:
         try:

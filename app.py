@@ -74,7 +74,7 @@ def predict_impact(filing, stock_data):
         return 'Neutral impact'
 
 # --- Monitor SEC filings ---
-ddef monitor_sec_filings():
+def monitor_sec_filings():
     import pytz
     import feedparser
     from datetime import datetime, timedelta

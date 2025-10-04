@@ -74,37 +74,62 @@ def predict_impact(filing, stock_data):
         return 'Neutral impact'
 
 # --- Monitor SEC filings ---
-def monitor_sec_filings():
+ddef monitor_sec_filings():
+    import pytz
+    import feedparser
+    from datetime import datetime, timedelta
+
+    eastern = pytz.timezone('US/Eastern')
     url = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&CIK=&type=&company=&dateb=&owner=include&start=0&count=100&output=atom'
     feed = feedparser.parse(url)
     new_filings = []
-    eastern = pytz.timezone('US/Eastern')
-    cutoff = datetime.now(eastern) - timedelta(minutes=120)
+
+    cutoff = datetime.now(eastern) - timedelta(minutes=120)  # last 2 hours
+
+    print(f"Fetched {len(feed.entries)} entries from SEC feed")
 
     for entry in feed.entries:
         try:
-            timestamp = datetime.strptime(entry.updated, '%Y-%m-%dT%H:%M:%SZ')
-            timestamp = timestamp.replace(tzinfo=pytz.UTC).astimezone(eastern)
+            print("---- ENTRY ----")
+            print("Title:", entry.title)
+            print("Author:", getattr(entry, 'author', 'N/A'))
+            print("Link:", entry.link)
+            print("Updated:", getattr(entry, 'updated', 'N/A'))
+
+            timestamp = datetime.strptime(entry.updated, '%Y-%m-%dT%H:%M:%SZ')  # Parse UTC timestamp
+            timestamp = timestamp.astimezone(eastern)
+
             if timestamp < cutoff:
+                print("Skipping: older than cutoff")
                 continue
-            filing_id = entry.id.split('/')[-1]
-            form_type = entry.title.split()[0]
-            company = entry.author
-            cik = entry.link.split('CIK=')[-1].split('&')[0].zfill(10)
+
+            filing_id = entry.id.split('/')[-1]  # Unique ID
+            form_type = entry.title.split()[0]  # e.g., '8-K'
+            company = getattr(entry, 'author', 'N/A')
+            cik = entry.link.split('CIK=')[-1].split('&')[0]
+            cik = str(cik).zfill(10)
+
+            # Check if already in DB
             if not conn.execute('SELECT id FROM filings WHERE id=?', (filing_id,)).fetchone():
-                conn.execute('INSERT INTO filings VALUES (?, ?, ?, ?, ?)', (filing_id, timestamp, form_type, cik, company))
+                conn.execute('INSERT INTO filings VALUES (?, ?, ?, ?, ?)',
+                             (filing_id, timestamp, form_type, cik, company))
                 conn.commit()
                 new_filings.append({
                     'timestamp': timestamp,
                     'form_type': form_type,
                     'company': company,
                     'cik': cik,
-                    'filing_link': entry.link,
-                    'content_link': next((link['href'] for link in entry.links if 'txt' in link['href'] or 'xml' in link['href']), None)
+                    'filing_link': entry.link
                 })
+                print(f"Inserted: {form_type} - {company} ({cik})")
+            else:
+                print("Already in DB:", filing_id)
+
         except Exception as e:
             print(f"Error processing entry: {e}")
             continue
+
+    print(f"Total new filings inserted: {len(new_filings)}")
     return new_filings
 
 # --- Start background scheduler ---

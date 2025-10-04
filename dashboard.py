@@ -67,6 +67,15 @@ st.sidebar.info(f"Last updated: {st.session_state.last_update.strftime('%Y-%m-%d
 st.sidebar.success("Monitoring every 1 min. Check during market hours for new filings.")
 
 # --------------------------
+# Live DB Check
+# --------------------------
+cursor = conn.execute('SELECT COUNT(*), MAX(timestamp) FROM filings')
+total, last_time = cursor.fetchone()
+st.sidebar.info(f"Total filings in DB: {total}")
+st.sidebar.info(f"Last filing timestamp: {last_time}")
+st.sidebar.text("Scheduler is running ✅")
+
+# --------------------------
 # Main Dashboard
 # --------------------------
 df = load_recent_filings()

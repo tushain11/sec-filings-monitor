@@ -1,11 +1,11 @@
 import streamlit as st
-from streamlit import st_autorefresh
 from datetime import datetime
 import matplotlib.pyplot as plt
 import pandas as pd
 import yfinance as yf
 import sqlite3
 import pytz
+import time
 from app import monitor_sec_filings, get_ticker, get_stock_analysis, predict_impact
 
 # --- Setup DB ---
@@ -17,8 +17,13 @@ conn.execute('CREATE TABLE IF NOT EXISTS filings (id TEXT PRIMARY KEY, timestamp
 st.set_page_config(page_title="SEC Filings Monitor Dashboard", layout="wide")
 st.title("📰 Real-Time SEC Filings & Stock Impact Predictor")
 
-# --- Auto-refresh every 60 seconds ---
-count = st_autorefresh(interval=60*1000, limit=None, key="refresh")  # interval in milliseconds
+# --- Auto-refresh using experimental_rerun ---
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+if time.time() - st.session_state.last_refresh > 60:
+    st.session_state.last_refresh = time.time()
+    st.experimental_rerun()  # Refresh the app every 60 seconds
 
 # --- Load filings ---
 def load_recent_filings(n=50):

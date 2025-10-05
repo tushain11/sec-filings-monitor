@@ -1,145 +1,126 @@
-import feedparser
-import yfinance as yf
 import requests
-from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 import sqlite3
-import json
-import warnings
-import pytz
-import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from apscheduler.schedulers.background import BackgroundScheduler
+import datetime
+import re
+import time
 
-warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
-nltk.download('vader_lexicon', quiet=True)
-
-# --- SQLite setup (thread-safe for scheduler) ---
 DB_PATH = "sec_filings.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-conn.execute('CREATE TABLE IF NOT EXISTS filings (id TEXT PRIMARY KEY, timestamp DATETIME, form_type TEXT, cik TEXT, company TEXT)')
 
-# --- Load ticker mapping ---
-def get_ticker(cik):
-    try:
-        with open('company_tickers.json', 'r') as f:
-            data = json.load(f)
-        cik_to_ticker = {}
-        for entry in data.values():
-            cik_key = str(entry['cik_str']).zfill(10)
-            cik_to_ticker[cik_key] = entry['ticker']
-        return cik_to_ticker.get(str(cik).zfill(10), 'N/A')
-    except Exception as e:
-        print(f"Error loading ticker map: {e}")
-        return 'N/A'
+# --- Database setup ---
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS filings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company TEXT,
+                    form_type TEXT,
+                    accession_number TEXT,
+                    filing_date TEXT,
+                    filing_time TEXT,
+                    link TEXT,
+                    cik TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+    conn.commit()
+    conn.close()
 
-# --- Stock analysis ---
-def get_stock_analysis(ticker):
-    if ticker == 'N/A':
-        return {'error': 'No ticker available'}
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {
-            'current_price': info.get('currentPrice', 'N/A'),
-            'recommendation': info.get('recommendationKey', 'N/A'),
-            'target_price': info.get('targetMeanPrice', 'N/A'),
-            'news_headlines': [n['title'] for n in stock.news[:3]]
-        }
-    except Exception as e:
-        print(f"Error fetching stock data for {ticker}: {e}")
-        return {'error': 'Fetch failed'}
+# --- Scrape SEC Current Filings page ---
+def scrape_sec_filings():
+    url = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"
+    headers = {"User-Agent": "SECMonitorBot/1.0 (tushar@example.com)"}
+    r = requests.get(url, headers=headers, timeout=15)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-# --- Predict filing impact ---
-def predict_impact(filing, stock_data):
-    sia = SentimentIntensityAnalyzer()
-    form_impact = {
-        '8-K': 0.2,
-        '10-Q': 0.1,
-        '10-K': 0.1,
-        '4': -0.3,
-        'SC 13D': 0.4,
-    }
-    form_score = form_impact.get(filing['form_type'], 0)
-    desc_sent = sia.polarity_scores(filing['company'] + ' ' + filing['form_type'])['compound']
-    rec_score = 0.3 if stock_data.get('recommendation') in ['buy', 'strong_buy'] else -0.2 if stock_data.get('recommendation') in ['sell', 'strong_sell'] else 0
-    news_sent = 0
-    if 'news_headlines' in stock_data:
-        news_sent = sum(sia.polarity_scores(headline)['compound'] for headline in stock_data['news_headlines']) / len(stock_data['news_headlines'])
-    total_score = (form_score + desc_sent + rec_score + news_sent) / 4
-    if total_score > 0.1:
-        return 'Likely positive impact (price up ~2-5%)'
-    elif total_score < -0.1:
-        return 'Likely negative impact (price down ~2-5%)'
-    else:
-        return 'Neutral impact'
+    filings = []
+    current_date = datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-# --- Monitor SEC filings ---
-def monitor_sec_filings():
-    import pytz
-    import feedparser
-    from datetime import datetime, timedelta
-
-    eastern = pytz.timezone('US/Eastern')
-    url = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&CIK=&type=&company=&dateb=&owner=include&start=0&count=100&output=atom'
-    feed = feedparser.parse(url)
-    new_filings = []
-
-    cutoff = datetime.now(eastern) - timedelta(minutes=120)  # last 2 hours
-
-    print(f"Fetched {len(feed.entries)} entries from SEC feed")
-
-    for entry in feed.entries:
-        try:
-            print("---- ENTRY ----")
-            print("Title:", entry.title)
-            print("Author:", getattr(entry, 'author', 'N/A'))
-            print("Link:", entry.link)
-            print("Updated:", getattr(entry, 'updated', 'N/A'))
-
-            timestamp = datetime.strptime(entry.updated, '%Y-%m-%dT%H:%M:%SZ')  # Parse UTC timestamp
-            timestamp = timestamp.astimezone(eastern)
-
-            if timestamp < cutoff:
-                print("Skipping: older than cutoff")
-                continue
-
-            filing_id = entry.id.split('/')[-1]  # Unique ID
-            form_type = entry.title.split()[0]  # e.g., '8-K'
-            company = getattr(entry, 'author', 'N/A')
-            cik = entry.link.split('CIK=')[-1].split('&')[0]
-            cik = str(cik).zfill(10)
-
-            # Check if already in DB
-            if not conn.execute('SELECT id FROM filings WHERE id=?', (filing_id,)).fetchone():
-                conn.execute('INSERT INTO filings VALUES (?, ?, ?, ?, ?)',
-                             (filing_id, timestamp, form_type, cik, company))
-                conn.commit()
-                new_filings.append({
-                    'timestamp': timestamp,
-                    'form_type': form_type,
-                    'company': company,
-                    'cik': cik,
-                    'filing_link': entry.link
-                })
-                print(f"Inserted: {form_type} - {company} ({cik})")
-            else:
-                print("Already in DB:", filing_id)
-
-        except Exception as e:
-            print(f"Error processing entry: {e}")
+    for row in soup.find_all("tr"):
+        cols = row.find_all("td")
+        if len(cols) < 4:
             continue
 
-    print(f"Total new filings inserted: {len(new_filings)}")
-    return new_filings
+        form_type = cols[0].get_text(strip=True)
+        company = cols[1].get_text(strip=True)
+        link_tag = cols[1].find("a", href=True)
+        link = "https://www.sec.gov" + link_tag["href"] if link_tag else None
+        accession_match = re.search(r"Accession Number:\s*([\d\-]+)", row.get_text())
+        accession_number = accession_match.group(1) if accession_match else None
 
-# --- Start background scheduler ---
-scheduler = BackgroundScheduler()
-scheduler.add_job(monitor_sec_filings, 'interval', minutes=1)
-scheduler.start()
-print("SEC monitor running every 1 min. Press Ctrl+C to stop.")
+        accepted_text = cols[3].get_text(strip=True)
+        if " " in accepted_text:
+            filing_date, filing_time = accepted_text.split(" ", 1)
+        else:
+            filing_date, filing_time = current_date, accepted_text
 
-# --- Optional: run once immediately ---
+        cik_match = re.search(r"\((\d{10})\)", company)
+        cik = cik_match.group(1) if cik_match else None
+
+        filings.append({
+            "company": company,
+            "form_type": form_type,
+            "accession_number": accession_number,
+            "filing_date": filing_date,
+            "filing_time": filing_time,
+            "link": link,
+            "cik": cik
+        })
+
+    return filings
+
+# --- Save to DB ---
+def save_filings_to_db(filings):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    inserted_count = 0
+
+    for f in filings:
+        if not f["accession_number"]:
+            continue
+
+        c.execute("SELECT 1 FROM filings WHERE accession_number = ?", (f["accession_number"],))
+        if c.fetchone():
+            continue
+
+        c.execute('''INSERT INTO filings (company, form_type, accession_number, filing_date,
+                     filing_time, link, cik) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  (f["company"], f["form_type"], f["accession_number"],
+                   f["filing_date"], f["filing_time"], f["link"], f["cik"]))
+        inserted_count += 1
+
+    conn.commit()
+    conn.close()
+    return inserted_count
+
+# --- Run Monitor ---
+def monitor_sec_filings():
+    print(f"Running SEC filings monitor at {datetime.datetime.utcnow()} UTC")
+    filings = scrape_sec_filings()
+    inserted = save_filings_to_db(filings)
+    print(f"Inserted {inserted} new filings.")
+    return inserted
+
+# --- Utility functions used by dashboard.py ---
+def get_recent_filings(limit=50):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT company, form_type, filing_date, filing_time, link FROM filings ORDER BY id DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# Placeholder stubs for dashboard.py compatibility
+def get_ticker(cik):
+    return None
+
+def get_stock_analysis(ticker):
+    return {"summary": "No analysis available (placeholder)"}
+
+def predict_impact(ticker, form_type):
+    return "Neutral"
+
 if __name__ == "__main__":
-    new = monitor_sec_filings()
-    if new:
-        print(f"Inserted {len(new)} filings")
+    init_db()
+    while True:
+        monitor_sec_filings()
+        time.sleep(300)  # every 5 minutes
